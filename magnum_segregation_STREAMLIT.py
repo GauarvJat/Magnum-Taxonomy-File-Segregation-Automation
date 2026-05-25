@@ -1,5 +1,5 @@
 """
-Magnum — Data Segregation Tool  (Streamlit version)
+DG Magnum Taxonomy— Data Segregation Tool  (Streamlit version)
 Deploy: push to GitHub → connect repo to streamlit.app
 """
 
@@ -388,7 +388,7 @@ def main():
 
     # ── Footer ────────────────────────────────────────────────────────────────
     st.markdown("---")
-    st.caption("© Magnum Analytics  |  Internal use only")
+    st.caption("© Data Governance  |  Internal use only")
 
 
 if __name__ == "__main__":
