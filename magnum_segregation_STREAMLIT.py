@@ -213,7 +213,7 @@ def build_zip(output_files: dict) -> bytes:
 
 def main():
     st.set_page_config(
-        page_title="Magnum — Data Segregation",
+        page_title="DG Taxonomy — Data Segregation",
         page_icon="🔷",
         layout="centered"
     )
