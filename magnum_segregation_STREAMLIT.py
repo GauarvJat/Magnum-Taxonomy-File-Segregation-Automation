@@ -271,7 +271,7 @@ def main():
     # ── Hero header ───────────────────────────────────────────────────────────
     st.markdown("""
     <div class="hero">
-        <h1>MAGNUM</h1>
+        <h1>DG MAGNUM TAXONOMY</h1>
         <p>Data Segregation Tool &nbsp;·&nbsp; v2.1</p>
         <div style="margin-top:12px">
             <span class="pill">AdServer</span>
