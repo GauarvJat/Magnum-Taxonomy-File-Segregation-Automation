@@ -4,15 +4,12 @@ Magnum  —  Data Segregation Tool  (Streamlit / Web version)
 Run locally : streamlit run magnum_segregation_STREAMLIT.py
 Deploy      : Push repo to GitHub → connect to streamlit.app
               Set the main file to: magnum_segregation_STREAMLIT.py
-
 IMPORTANT — requirements.txt must be in the GitHub repo ROOT:
     streamlit
     pandas
     openpyxl
 """
-
 from __future__ import annotations
-
 import io
 import zipfile
 from pathlib import PurePath
@@ -33,7 +30,6 @@ try:
     import pandas as pd
 except ImportError:
     _missing.append("pandas")
-
 try:
     from openpyxl import load_workbook
     from openpyxl.styles import PatternFill
@@ -49,11 +45,9 @@ if _missing:
     )
     st.stop()
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
-
 PLATFORM_CONFIG: dict[str, list[str]] = {
     "AdServer":     ["CAMPAIGN", "PLACEMENT", "CREATIVE"],
     "Paid Social":  ["CAMPAIGN", "PLACEMENT", "CREATIVE"],
@@ -67,11 +61,9 @@ COLS_TO_DROP: list[str] = ["clicks", "currency", "spend"]
 # Known level tokens used when parsing filenames
 KNOWN_LEVELS: list[str] = ["CAMPAIGN", "PLACEMENT", "PLACEMENTGROUP", "CREATIVE"]
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CORE LOGIC
 # ═══════════════════════════════════════════════════════════════════════════════
-
 def parse_filename(filename: str) -> tuple[str | None, str | None, str | None]:
     """
     Parses filenames in the format:  Platform LEVEL - Date.xlsx
@@ -133,8 +125,14 @@ def process_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
 
 def apply_formatting(file_bytes: bytes) -> bytes:
     """
-    Red-highlights every cell containing 'Is missing' or 'Invalid',
-    skipping columns whose header contains 'free text'.
+    Red-highlights validation issues in the workbook:
+      - CAMPAIGN / PLACEMENT sheets (and any non-CREATIVE sheet):
+        every cell containing 'Is missing' / 'Invalid' / 'Invalid value',
+        skipping any column whose header contains 'free text'.
+      - CREATIVE sheet:
+        ONLY the column named EXACTLY "Influencer" (case-insensitive,
+        ignoring leading/trailing spaces) is checked and highlighted.
+        Columns like "Influencer Name" or "Influencer Type" are left alone.
     Works entirely in memory — no files written to disk.
     """
     wb       = load_workbook(io.BytesIO(file_bytes))
@@ -144,16 +142,31 @@ def apply_formatting(file_bytes: bytes) -> bytes:
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
 
-        # Build set of Free Text column indices to skip
-        free_text_cols: set[int] = set()
-        for cell in ws[1]:
-            if cell.value and "free text" in str(cell.value).lower():
-                free_text_cols.add(cell.column)
+        # Build a column-index -> header-text map for row 1
+        headers: dict[int, str] = {
+            cell.column: (str(cell.value).strip() if cell.value else "")
+            for cell in ws[1]
+        }
+
+        # Free Text columns are always skipped, on every sheet
+        free_text_cols = {
+            col for col, name in headers.items() if "free text" in name.lower()
+        }
+
+        is_creative = sheet_name.upper() == "CREATIVE"
 
         for row in ws.iter_rows(min_row=2):
             for cell in row:
                 if cell.column in free_text_cols:
                     continue
+
+                header = headers.get(cell.column, "")
+
+                # CREATIVE Sheet Rule:
+                # Highlight ONLY the column exactly named "Influencer"
+                if is_creative and header.lower() != "influencer":
+                    continue
+
                 if cell.value and str(cell.value).strip().lower() in bad_vals:
                     cell.fill = red_fill
 
@@ -201,14 +214,11 @@ def run_segregation(
     # Phase 2 — process
     for platform, dates in inputs.items():
         stats["platforms_processed"] += 1
-
         for date, levels in dates.items():
             counter += 1
             if progress_cb:
                 progress_cb(counter / max(total, 1))
-
             market_data: dict = {}
-
             for level, uf in levels.items():
                 try:
                     uf.seek(0)
@@ -231,7 +241,6 @@ def run_segregation(
             for market, levels_dict in market_data.items():
                 safe_market     = str(market).replace("/", "-").replace("\\", "-")
                 output_filename = f"{platform}_{safe_market}_{date}.xlsx"
-
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                     for level in PLATFORM_CONFIG[platform]:
@@ -240,7 +249,6 @@ def run_segregation(
                                 writer, sheet_name=level, index=False
                             )
                             stats["tabs_created"] += 1
-
                 output_files[output_filename] = apply_formatting(buf.getvalue())
                 stats["files_created"] += 1
 
@@ -259,7 +267,6 @@ def build_zip(output_files: dict[str, bytes]) -> bytes:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CSS — full Streamlit chrome override
 # ═══════════════════════════════════════════════════════════════════════════════
-
 st.markdown("""
 <style>
 /* ── Global background ── */
@@ -269,13 +276,11 @@ html, body, [data-testid="stAppViewContainer"] {
 [data-testid="stAppViewContainer"] > .main {
     background-color: #0E1628;
 }
-
 /* ── Hide Streamlit chrome ── */
 [data-testid="stHeader"]  { background: transparent !important; }
 [data-testid="stToolbar"] { display: none !important; }
 footer                    { visibility: hidden !important; }
 #MainMenu                 { display: none !important; }
-
 /* ── Hero banner ── */
 .mg-hero {
     background: linear-gradient(135deg, #111F3E 0%, #1A1A2E 100%);
@@ -296,14 +301,12 @@ footer                    { visibility: hidden !important; }
     color: #E94560; font-size: .78rem; font-weight: 700;
     padding: 3px 14px; border-radius: 20px; letter-spacing: .4px;
 }
-
 /* ── Section label ── */
 .mg-label {
     font-size: .72rem; font-weight: 800;
     letter-spacing: 1.6px; text-transform: uppercase;
     color: #7A90AA; margin-bottom: 8px;
 }
-
 /* ── File uploader ── */
 [data-testid="stFileUploader"] section {
     background: #111F3E !important;
@@ -314,7 +317,6 @@ footer                    { visibility: hidden !important; }
     border-color: #E94560 !important;
 }
 [data-testid="stFileUploader"] label { color: #7A90AA !important; }
-
 /* ── Run button ── */
 .stButton > button {
     background: #E94560 !important;
@@ -330,7 +332,6 @@ footer                    { visibility: hidden !important; }
 }
 .stButton > button:hover    { background: #C73350 !important; }
 .stButton > button:disabled { opacity: .45 !important; }
-
 /* ── Download button ── */
 .stDownloadButton > button {
     background: #0066CC !important;
@@ -344,7 +345,6 @@ footer                    { visibility: hidden !important; }
     transition: background .2s;
 }
 .stDownloadButton > button:hover { background: #0052A3 !important; }
-
 /* ── Metric boxes ── */
 [data-testid="metric-container"] {
     background: #111F3E;
@@ -354,7 +354,6 @@ footer                    { visibility: hidden !important; }
 }
 [data-testid="metric-container"] label { color: #7A90AA !important; font-size: .8rem !important; }
 [data-testid="stMetricValue"]          { color: #E94560 !important; font-weight: 800 !important; }
-
 /* ── Alerts ── */
 [data-testid="stAlert"] {
     background: #111F3E !important;
@@ -362,10 +361,8 @@ footer                    { visibility: hidden !important; }
     border-radius: 8px !important;
     color: #7A90AA !important;
 }
-
 /* ── Progress bar ── */
 [data-testid="stProgressBar"] > div > div { background: #E94560 !important; }
-
 /* ── Expander ── */
 [data-testid="stExpander"] {
     background: #111F3E !important;
@@ -373,10 +370,8 @@ footer                    { visibility: hidden !important; }
     border-radius: 10px !important;
 }
 .streamlit-expanderHeader { color: #7A90AA !important; font-size: .9rem !important; }
-
 /* ── Divider ── */
 hr { border-color: #1E3058 !important; }
-
 /* ── Text ── */
 p, li, span { color: #7A90AA; }
 strong      { color: #D0DCF0 !important; }
@@ -385,7 +380,6 @@ code {
     border-radius: 4px !important; font-size: .84rem !important;
     padding: 1px 6px !important;
 }
-
 /* ── Footer ── */
 .mg-footer {
     text-align: center; color: #1E3058;
@@ -395,11 +389,9 @@ code {
 </style>
 """, unsafe_allow_html=True)
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  UI — HERO
 # ═══════════════════════════════════════════════════════════════════════════════
-
 st.markdown("""
 <div class="mg-hero">
     <div class="mg-hero-name">🔷 MAGNUM</div>
@@ -413,19 +405,15 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  UI — FILE NAMING GUIDE
 # ═══════════════════════════════════════════════════════════════════════════════
-
 with st.expander("📋  File Naming Convention — click to expand"):
     st.markdown("""
 Each uploaded file **must** follow this exact naming pattern:
-
 ```
 Platform LEVEL - Date.xlsx
 ```
-
 **Valid examples:**
 ```
 AdServer CAMPAIGN - Jan 2025.xlsx
@@ -433,7 +421,6 @@ Paid Social PLACEMENT - Jan 2025.xlsx
 Programmatic CREATIVE - Jan 2025.xlsx
 Search CAMPAIGN - Jan 2025.xlsx
 ```
-
 | Platform | Valid Levels |
 |---|---|
 | AdServer | CAMPAIGN · PLACEMENT · CREATIVE |
@@ -449,44 +436,35 @@ Search CAMPAIGN - Jan 2025.xlsx
 - `Free Text` columns are excluded from **Is missing** flagging and red highlighting
 - Columns **Clicks**, **Currency**, and **Spend** are removed from all outputs
 - NC columns are removed after flagging
+- On the **CREATIVE** tab, only the column named exactly **Influencer** is checked and highlighted
 """)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  UI — UPLOAD
 # ═══════════════════════════════════════════════════════════════════════════════
-
 st.markdown('<div class="mg-label">Upload Input Files</div>', unsafe_allow_html=True)
-
 uploaded_files = st.file_uploader(
     label                 = "Drop your .xlsx files here or click to browse",
     type                  = ["xlsx"],
     accept_multiple_files = True,
     label_visibility      = "collapsed",
 )
-
 if uploaded_files:
     st.info(f"**{len(uploaded_files)}** file(s) selected and ready to process.")
-
 st.markdown("<br>", unsafe_allow_html=True)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  UI — RUN BUTTON
 # ═══════════════════════════════════════════════════════════════════════════════
-
 run_clicked = st.button(
     "▶   Run Segregation",
     disabled = not bool(uploaded_files),
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PROCESSING
 # ═══════════════════════════════════════════════════════════════════════════════
-
 if run_clicked and uploaded_files:
-
     progress_bar = st.progress(0, text="Initialising…")
 
     def update_progress(fraction: float):
@@ -526,7 +504,6 @@ if run_clicked and uploaded_files:
     if output_files:
         st.markdown("---")
         st.markdown('<div class="mg-label">Download Output</div>', unsafe_allow_html=True)
-
         if len(output_files) == 1:
             fname, data = next(iter(output_files.items()))
             st.download_button(
@@ -552,11 +529,9 @@ if run_clicked and uploaded_files:
             "Check that your filenames match the required format above."
         )
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FOOTER
 # ═══════════════════════════════════════════════════════════════════════════════
-
 st.markdown(
     '<div class="mg-footer">© Magnum Analytics &nbsp;·&nbsp; Internal Use Only</div>',
     unsafe_allow_html=True,
