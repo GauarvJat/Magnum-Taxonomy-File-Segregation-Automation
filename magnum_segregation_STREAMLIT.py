@@ -98,12 +98,13 @@ def process_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
     4. Drop Clicks, Currency, Spend columns.
     """
     # Step 1 — fill missing, skip Free Text columns
-    start, end_plus_one = get_nc_indices(df)
+    start, end_exclusive = get_nc_indices(df)
     if start is not None:
-        for col_idx in range(start, end_plus_one + 1):
+        for col_idx in range(start, end_exclusive):
             col_name = df.columns[col_idx]
             if "free text" not in str(col_name).lower():
-                df.iloc[:, col_idx] = df.iloc[:, col_idx].fillna("Is missing")
+                df[col_name] = df[col_name].astype(object) # ✅ widen dtype first
+                df[col_name] = df[col_name].where(df[col_name].notna(), "Is missing")
 
     # Step 2 — rename duplicate Market column
     market_cols = [c for c in df.columns if str(c).lower() == "market"]
