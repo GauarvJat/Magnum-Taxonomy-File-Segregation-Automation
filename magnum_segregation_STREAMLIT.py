@@ -6,7 +6,7 @@ Deploy      : Push repo to GitHub → connect to streamlit.app
               Set the main file to: magnum_segregation_STREAMLIT.py
 IMPORTANT — requirements.txt must be in the GitHub repo ROOT:
     streamlit
-    pandas
+    pandas==2.2.2
     openpyxl
 """
 from __future__ import annotations
@@ -40,7 +40,7 @@ if _missing:
     st.error(
         f"**Missing package(s): `{'`, `'.join(_missing)}`**\n\n"
         "Make sure your GitHub repo root contains a `requirements.txt` file with:\n\n"
-        "```\nstreamlit\npandas\nopenpyxl\n```\n\n"
+        "```\nstreamlit\npandas==2.2.2\nopenpyxl\n```\n\n"
         "Streamlit Cloud will install them automatically on the next deploy."
     )
     st.stop()
@@ -57,6 +57,9 @@ PLATFORM_CONFIG: dict[str, list[str]] = {
 
 # Columns dropped from every output file (case-insensitive)
 COLS_TO_DROP: list[str] = ["clicks", "currency", "spend"]
+
+# CHANGE 1: Columns highlighted on the CREATIVE tab (exact header match, case-insensitive)
+CREATIVE_HIGHLIGHT_COLS: set[str] = {"influencer", "video length"}
 
 # Known level tokens used when parsing filenames
 KNOWN_LEVELS: list[str] = ["CAMPAIGN", "PLACEMENT", "PLACEMENTGROUP", "CREATIVE"]
@@ -84,9 +87,30 @@ def parse_filename(filename: str) -> tuple[str | None, str | None, str | None]:
 
 
 def get_nc_indices(df: "pd.DataFrame") -> tuple[int | None, int | None]:
-    """Returns the first and last+1 column indices of NC-named columns."""
+    """Returns the first and last+1 (exclusive) column indices of NC-named columns."""
     nc_cols = [i for i, col in enumerate(df.columns) if "NC" in str(col)]
     return (nc_cols[0], nc_cols[-1] + 1) if nc_cols else (None, None)
+
+
+def get_column_formats(file_bytes: bytes, sample_rows: int = 50) -> dict[str, str]:
+    """
+    CHANGE 2: Reads the number format (e.g. '0', '@', '#,##0') of each column
+    in the input file, so the same format can be applied to the output file.
+    Uses the first non-empty cell under each header.
+    """
+    formats: dict[str, str] = {}
+    wb = load_workbook(io.BytesIO(file_bytes), read_only=True)
+    ws = wb.worksheets[0]
+    rows = ws.iter_rows(min_row=1, max_row=sample_rows + 1)
+    headers = [str(c.value).strip() if c.value is not None else "" for c in next(rows)]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            if idx >= len(headers) or not headers[idx] or headers[idx] in formats:
+                continue
+            if cell.value is not None and cell.value != "":
+                formats[headers[idx]] = cell.number_format
+    wb.close()
+    return formats
 
 
 def process_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
@@ -103,13 +127,13 @@ def process_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
         for col_idx in range(start, end_exclusive):
             col_name = df.columns[col_idx]
             if "free text" not in str(col_name).lower():
-                df[col_name] = df[col_name].astype(object) # ✅ widen dtype first
+                df[col_name] = df[col_name].astype(object)
                 df[col_name] = df[col_name].where(df[col_name].notna(), "Is missing")
 
     # Step 2 — rename duplicate Market column
     market_cols = [c for c in df.columns if str(c).lower() == "market"]
     if len(market_cols) > 1:
-        df.rename(columns={market_cols[1]: "Market_MK"}, inplace=True)
+        df.rename(columns={market_cols"Market_MK"}, inplace=True)
 
     # Step 3 — drop NC columns
     nc_cols = [c for c in df.columns if "NC" in str(c)]
@@ -124,21 +148,22 @@ def process_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
     return df
 
 
-def apply_formatting(file_bytes: bytes) -> bytes:
+def apply_formatting(file_bytes: bytes, formats_by_level: dict | None = None) -> bytes:
     """
-    Red-highlights validation issues in the workbook:
+    Applies input number formats and red-highlights validation issues:
+      - Every sheet: same number format as the input file for each column.
       - CAMPAIGN / PLACEMENT sheets (and any non-CREATIVE sheet):
         every cell containing 'Is missing' / 'Invalid' / 'Invalid value',
         skipping any column whose header contains 'free text'.
       - CREATIVE sheet:
-        ONLY the column named EXACTLY "Influencer" (case-insensitive,
-        ignoring leading/trailing spaces) is checked and highlighted.
-        Columns like "Influencer Name" or "Influencer Type" are left alone.
+        ONLY the columns named EXACTLY "Influencer" or "Video Length"
+        (case-insensitive) are checked and highlighted.
     Works entirely in memory — no files written to disk.
     """
     wb       = load_workbook(io.BytesIO(file_bytes))
     red_fill = PatternFill(start_color="FFFF0000", fill_type="solid")
     bad_vals = {"is missing", "invalid", "invalid value"}
+    formats_by_level = formats_by_level or {}
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -156,16 +181,24 @@ def apply_formatting(file_bytes: bytes) -> bytes:
 
         is_creative = sheet_name.upper() == "CREATIVE"
 
+        # CHANGE 2: number formats captured from this level's input file
+        col_formats = formats_by_level.get(sheet_name, {})
+
         for row in ws.iter_rows(min_row=2):
             for cell in row:
+                header = headers.get(cell.column, "")
+
+                # Apply the same number format as the input file
+                fmt = col_formats.get(header)
+                if fmt and fmt != "General":
+                    cell.number_format = fmt
+
                 if cell.column in free_text_cols:
                     continue
 
-                header = headers.get(cell.column, "")
-
                 # CREATIVE Sheet Rule:
-                # Highlight ONLY the column exactly named "Influencer"
-                if is_creative and header.lower() != "influencer":
+                # Highlight only "Influencer" and "Video Length" columns
+                if is_creative and header.lower() not in CREATIVE_HIGHLIGHT_COLS:
                     continue
 
                 if cell.value and str(cell.value).strip().lower() in bad_vals:
@@ -203,8 +236,7 @@ def run_segregation(
         if not platform:
             stats["skipped"].append(f"{uf.name}  — unknown platform: '{platform_raw}'")
             continue
-        if level not in PLATFORM_CONFIG[platform]:
-            stats["skipped"].append(f"{uf.name}  — '{level}' not valid for {platform}")
+        if level not in PLATFORM_CONFIGstats["skipped"].append(f"{uf.name}  — '{level}' not valid for {platform}")
             continue
         inputs.setdefault(platform, {}).setdefault(date, {})[level] = uf
 
@@ -220,19 +252,25 @@ def run_segregation(
             if progress_cb:
                 progress_cb(counter / max(total, 1))
             market_data: dict = {}
+            formats_by_level: dict = {}
             for level, uf in levels.items():
                 try:
                     uf.seek(0)
+                    file_bytes = uf.read()
+                    # CHANGE 2: dtype=object keeps IDs/numbers exactly as stored
+                    # (no 12345 -> 12345.0 conversion when a column has blanks)
                     df = pd.read_excel(
-                        io.BytesIO(uf.read()),
+                        io.BytesIO(file_bytes),
                         keep_default_na=False,
                         na_values=[""],
+                        dtype=object,
                     )
                     if df.empty or "Market" not in df.columns:
                         stats["skipped"].append(
                             f"{uf.name}  — empty or missing 'Market' column"
                         )
                         continue
+                    formats_by_level[level] = get_column_formats(file_bytes)
                     df = process_dataframe(df)
                     for market, group in df.groupby("Market"):
                         market_data.setdefault(str(market), {})[level] = group
@@ -244,13 +282,14 @@ def run_segregation(
                 output_filename = f"{platform}_{safe_market}_{date}.xlsx"
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    for level in PLATFORM_CONFIG[platform]:
-                        if level in levels_dict:
+                    for level in PLATFORM_CONFIGif level in levels_dict:
                             levels_dict[level].to_excel(
                                 writer, sheet_name=level, index=False
                             )
                             stats["tabs_created"] += 1
-                output_files[output_filename] = apply_formatting(buf.getvalue())
+                output_files[output_filename] = apply_formatting(
+                    buf.getvalue(), formats_by_level
+                )
                 stats["files_created"] += 1
 
     return output_files, stats
@@ -396,7 +435,7 @@ code {
 st.markdown("""
 <div class="mg-hero">
     <div class="mg-hero-name">🔷 MAGNUM</div>
-    <div class="mg-hero-sub">Data Segregation Tool &nbsp;·&nbsp; v2.1</div>
+    <div class="mg-hero-sub">Data Segregation Tool &nbsp;·&nbsp; v2.3</div>
     <div class="mg-tags">
         <span class="mg-tag">● AdServer</span>
         <span class="mg-tag">● Paid Social</span>
@@ -412,128 +451,3 @@ st.markdown("""
 with st.expander("📋  File Naming Convention — click to expand"):
     st.markdown("""
 Each uploaded file **must** follow this exact naming pattern:
-```
-Platform LEVEL - Date.xlsx
-```
-**Valid examples:**
-```
-AdServer CAMPAIGN - Jan 2025.xlsx
-Paid Social PLACEMENT - Jan 2025.xlsx
-Programmatic CREATIVE - Jan 2025.xlsx
-Search CAMPAIGN - Jan 2025.xlsx
-```
-| Platform | Valid Levels |
-|---|---|
-| AdServer | CAMPAIGN · PLACEMENT · CREATIVE |
-| Paid Social | CAMPAIGN · PLACEMENT · CREATIVE |
-| Programmatic | CAMPAIGN · PLACEMENT · CREATIVE |
-| Search | CAMPAIGN · PLACEMENT · CREATIVE |
-
-**Output files are named:** `Platform_Market_Date.xlsx`
-> e.g. `Programmatic_Germany_Jan 2025.xlsx`
-
-**Notes:**
-- The `Market` column must exist in every input file
-- `Free Text` columns are excluded from **Is missing** flagging and red highlighting
-- Columns **Clicks**, **Currency**, and **Spend** are removed from all outputs
-- NC columns are removed after flagging
-- On the **CREATIVE** tab, only the column named exactly **Influencer** is checked and highlighted
-""")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  UI — UPLOAD
-# ═══════════════════════════════════════════════════════════════════════════════
-st.markdown('<div class="mg-label">Upload Input Files</div>', unsafe_allow_html=True)
-uploaded_files = st.file_uploader(
-    label                 = "Drop your .xlsx files here or click to browse",
-    type                  = ["xlsx"],
-    accept_multiple_files = True,
-    label_visibility      = "collapsed",
-)
-if uploaded_files:
-    st.info(f"**{len(uploaded_files)}** file(s) selected and ready to process.")
-st.markdown("<br>", unsafe_allow_html=True)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  UI — RUN BUTTON
-# ═══════════════════════════════════════════════════════════════════════════════
-run_clicked = st.button(
-    "▶   Run Segregation",
-    disabled = not bool(uploaded_files),
-)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PROCESSING
-# ═══════════════════════════════════════════════════════════════════════════════
-if run_clicked and uploaded_files:
-    progress_bar = st.progress(0, text="Initialising…")
-
-    def update_progress(fraction: float):
-        pct = min(int(fraction * 100), 99)
-        progress_bar.progress(pct, text=f"Processing…  {pct}%")
-
-    with st.spinner("Running segregation — please wait…"):
-        try:
-            output_files, stats = run_segregation(
-                uploaded_files,
-                progress_cb=update_progress,
-            )
-        except Exception as exc:
-            st.error(f"Fatal error: {exc}")
-            st.stop()
-
-    progress_bar.progress(100, text="Done ✅")
-    st.markdown("---")
-
-    # ── Stats ─────────────────────────────────────────────────────────────────
-    st.markdown("### ✅ Segregation Complete")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Platforms Processed",  stats["platforms_processed"])
-    c2.metric("Output Files Created", stats["files_created"])
-    c3.metric("Tabs Written",         stats["tabs_created"])
-
-    # ── Skipped files ─────────────────────────────────────────────────────────
-    if stats["skipped"]:
-        with st.expander(
-            f"⚠️  {len(stats['skipped'])} file(s) skipped — click to review",
-            expanded=True,
-        ):
-            for msg in stats["skipped"]:
-                st.markdown(f"- `{msg}`")
-
-    # ── Download ──────────────────────────────────────────────────────────────
-    if output_files:
-        st.markdown("---")
-        st.markdown('<div class="mg-label">Download Output</div>', unsafe_allow_html=True)
-        if len(output_files) == 1:
-            fname, data = next(iter(output_files.items()))
-            st.download_button(
-                label     = f"⬇️  Download  {fname}",
-                data      = data,
-                file_name = fname,
-                mime      = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        else:
-            zip_bytes = build_zip(output_files)
-            st.download_button(
-                label     = f"⬇️  Download All  ({len(output_files)} files)  as ZIP",
-                data      = zip_bytes,
-                file_name = "Magnum_Segregated_Output.zip",
-                mime      = "application/zip",
-            )
-            with st.expander(f"📂  Files included in the ZIP  ({len(output_files)})"):
-                for fname in sorted(output_files.keys()):
-                    st.markdown(f"- `{fname}`")
-    else:
-        st.warning(
-            "No output files were generated. "
-            "Check that your filenames match the required format above."
-        )
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  FOOTER
-# ═══════════════════════════════════════════════════════════════════════════════
-st.markdown(
-    '<div class="mg-footer">© Magnum Analytics &nbsp;·&nbsp; Internal Use Only</div>',
-    unsafe_allow_html=True,
-)
