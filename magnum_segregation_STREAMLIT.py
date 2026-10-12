@@ -40,7 +40,7 @@ if _missing:
     st.error(
         f"**Missing package(s): `{'`, `'.join(_missing)}`**\n\n"
         "Make sure your GitHub repo root contains a `requirements.txt` file with:\n\n"
-        "```\nstreamlit\npandas==2.2.2\nopenpyxl\n```\n\n"
+        "`streamlit`, `pandas==2.2.2`, `openpyxl`\n\n"
         "Streamlit Cloud will install them automatically on the next deploy."
     )
     st.stop()
@@ -133,7 +133,8 @@ def process_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
     # Step 2 — rename duplicate Market column
     market_cols = [c for c in df.columns if str(c).lower() == "market"]
     if len(market_cols) > 1:
-        df.rename(columns={market_cols"Market_MK"}, inplace=True)
+        second_market_col = market_cols[1]
+        df.rename(columns={second_market_col: "Market_MK"}, inplace=True)
 
     # Step 3 — drop NC columns
     nc_cols = [c for c in df.columns if "NC" in str(c)]
@@ -236,7 +237,9 @@ def run_segregation(
         if not platform:
             stats["skipped"].append(f"{uf.name}  — unknown platform: '{platform_raw}'")
             continue
-        if level not in PLATFORM_CONFIGstats["skipped"].append(f"{uf.name}  — '{level}' not valid for {platform}")
+        valid_levels = PLATFORM_CONFIG.get(platform, [])
+        if level not in valid_levels:
+            stats["skipped"].append(f"{uf.name}  — '{level}' not valid for {platform}")
             continue
         inputs.setdefault(platform, {}).setdefault(date, {})[level] = uf
 
@@ -282,7 +285,9 @@ def run_segregation(
                 output_filename = f"{platform}_{safe_market}_{date}.xlsx"
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    for level in PLATFORM_CONFIGif level in levels_dict:
+                    platform_levels = PLATFORM_CONFIG.get(platform, [])
+                    for level in platform_levels:
+                        if level in levels_dict:
                             levels_dict[level].to_excel(
                                 writer, sheet_name=level, index=False
                             )
@@ -451,3 +456,128 @@ st.markdown("""
 with st.expander("📋  File Naming Convention — click to expand"):
     st.markdown("""
 Each uploaded file **must** follow this exact naming pattern:
+
+`Platform LEVEL - Date.xlsx`
+
+**Valid examples:**
+- `AdServer CAMPAIGN - Jan 2025.xlsx`
+- `Paid Social PLACEMENT - Jan 2025.xlsx`
+- `Programmatic CREATIVE - Jan 2025.xlsx`
+- `Search CAMPAIGN - Jan 2025.xlsx`
+
+| Platform | Valid Levels |
+|---|---|
+| AdServer | CAMPAIGN · PLACEMENT · CREATIVE |
+| Paid Social | CAMPAIGN · PLACEMENT · CREATIVE |
+| Programmatic | CAMPAIGN · PLACEMENT · CREATIVE |
+| Search | CAMPAIGN · PLACEMENT · CREATIVE |
+
+**Output files are named:** `Platform_Market_Date.xlsx`
+> e.g. `Programmatic_Germany_Jan 2025.xlsx`
+
+**Notes:**
+- The `Market` column must exist in every input file
+- `Free Text` columns are excluded from **Is missing** flagging and red highlighting
+- Columns **Clicks**, **Currency**, and **Spend** are removed from all outputs
+- NC columns are removed after flagging
+- On the **CREATIVE** tab, only the **Influencer** and **Video Length** columns are checked and highlighted
+- ID and number columns keep the same format as the input files
+""")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  UI — UPLOAD
+# ═══════════════════════════════════════════════════════════════════════════════
+st.markdown('<div class="mg-label">Upload Input Files</div>', unsafe_allow_html=True)
+uploaded_files = st.file_uploader(
+    label                 = "Drop your .xlsx files here or click to browse",
+    type                  = ["xlsx"],
+    accept_multiple_files = True,
+    label_visibility      = "collapsed",
+)
+if uploaded_files:
+    st.info(f"**{len(uploaded_files)}** file(s) selected and ready to process.")
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  UI — RUN BUTTON
+# ═══════════════════════════════════════════════════════════════════════════════
+run_clicked = st.button(
+    "▶   Run Segregation",
+    disabled = not bool(uploaded_files),
+)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PROCESSING
+# ═══════════════════════════════════════════════════════════════════════════════
+if run_clicked and uploaded_files:
+    progress_bar = st.progress(0, text="Initialising…")
+
+    def update_progress(fraction: float):
+        pct = min(int(fraction * 100), 99)
+        progress_bar.progress(pct, text=f"Processing…  {pct}%")
+
+    with st.spinner("Running segregation — please wait…"):
+        try:
+            output_files, stats = run_segregation(
+                uploaded_files,
+                progress_cb=update_progress,
+            )
+        except Exception as exc:
+            st.error(f"Fatal error: {exc}")
+            st.stop()
+
+    progress_bar.progress(100, text="Done ✅")
+    st.markdown("---")
+
+    # ── Stats ─────────────────────────────────────────────────────────────────
+    st.markdown("### ✅ Segregation Complete")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Platforms Processed",  stats["platforms_processed"])
+    c2.metric("Output Files Created", stats["files_created"])
+    c3.metric("Tabs Written",         stats["tabs_created"])
+
+    # ── Skipped files ─────────────────────────────────────────────────────────
+    if stats["skipped"]:
+        with st.expander(
+            f"⚠️  {len(stats['skipped'])} file(s) skipped — click to review",
+            expanded=True,
+        ):
+            for msg in stats["skipped"]:
+                st.markdown(f"- `{msg}`")
+
+    # ── Download ──────────────────────────────────────────────────────────────
+    if output_files:
+        st.markdown("---")
+        st.markdown('<div class="mg-label">Download Output</div>', unsafe_allow_html=True)
+        if len(output_files) == 1:
+            fname, data = next(iter(output_files.items()))
+            st.download_button(
+                label     = f"⬇️  Download  {fname}",
+                data      = data,
+                file_name = fname,
+                mime      = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            zip_bytes = build_zip(output_files)
+            st.download_button(
+                label     = f"⬇️  Download All  ({len(output_files)} files)  as ZIP",
+                data      = zip_bytes,
+                file_name = "Magnum_Segregated_Output.zip",
+                mime      = "application/zip",
+            )
+            with st.expander(f"📂  Files included in the ZIP  ({len(output_files)})"):
+                for fname in sorted(output_files.keys()):
+                    st.markdown(f"- `{fname}`")
+    else:
+        st.warning(
+            "No output files were generated. "
+            "Check that your filenames match the required format above."
+        )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FOOTER
+# ═══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    '<div class="mg-footer">© Magnum Analytics &nbsp;·&nbsp; Internal Use Only</div>',
+    unsafe_allow_html=True,
+)
